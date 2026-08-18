@@ -1,0 +1,109 @@
+# Copyright (c) 2025 Ekkodale GmbH. All rights reserved.
+#
+# This file is part of the gaeco platform system.
+#
+# Use of this file is governed by the terms of the license
+# in LICENSE.md at the root of this repository.
+# Unauthorized copying, modification, distribution, or use of this file,
+# via any medium, is strictly prohibited except as expressly permitted
+# under that license.
+
+services:
+  guideline-postgres:
+    image: postgres:14
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${GUIDELINE_POSTGRES_PASSWORD}
+      POSTGRES_USER: ${GUIDELINE_POSTGRES_USER}
+      POSTGRES_DB: ${GUIDELINE_POSTGRES_DATABASE}
+    expose:
+      - 5432
+    volumes:
+      # Long "type: bind" form so `docker compose config --no-path-resolution` keeps
+      # the ${VOLUME_BASE_PATH} source intact (short form gets mis-typed as a volume).
+      - type: bind
+        source: ${VOLUME_BASE_PATH}/guideline/postgres/
+        target: /var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-q",
+          "-h",
+          "127.0.0.1",
+          "-d",
+          "${GUIDELINE_POSTGRES_DATABASE}",
+          "-U",
+          "${GUIDELINE_POSTGRES_USER}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 50
+      start_period: 30s
+
+  guideline-server:
+    image: ${IMAGE_BASE_PATH}/guideline-server:${GUIDELINE_SERVER_TAG}
+    restart: always
+    expose:
+      - 80
+    volumes:
+      - type: bind
+        source: ${VOLUME_BASE_PATH}/guideline
+        target: /app/Assets
+    networks:
+      - internal
+      - gaeco-network
+      - traefik-proxy
+    environment:
+      - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
+      - Postgres__Host=guideline-postgres
+      - Postgres__Port=5432
+      - Postgres__User=${GUIDELINE_POSTGRES_USER}
+      - Postgres__Password=${GUIDELINE_POSTGRES_PASSWORD}
+      - Postgres__Database=${GUIDELINE_POSTGRES_DATABASE}
+      - Kafka__Address=${KAFKA_ADDRESS}
+      - Minio__Address=${MINIO_ADDRESS}
+      - Minio__AccessKey=${MINIO_ROOT_USER}
+      - Minio__SecretKey=${MINIO_ROOT_PASSWORD}
+      - OpenTelemetry__OtlpEndpoint=${OTLP_ENDPOINT}
+      - Keycloak__ServerUrl=https://${KEYCLOAK_SERVER_HOSTNAME}
+      - Keycloak__Realm=${KEYCLOAK_REALM}
+      - Keycloak__Authority=https://${KEYCLOAK_SERVER_HOSTNAME}/realms/${KEYCLOAK_REALM}
+      - Kafka__UploadedGuidelineTopic=${KAFKA_TOPICS_GUIDELINES}
+      - AllowedCorsOrigins__ServerUrl=${ALLOWED_CORS_ORIGIN}
+    depends_on:
+      guideline-postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/localhost/80 && echo -e 'GET /health
+            HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n'
+            >&3 && cat <&3 | grep -q '200 OK'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 50
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-proxy"
+      - "traefik.http.routers.${STACK_NAME}-server.rule=Host(`${GUIDELINE_SERVER_HOSTNAME}`)"
+      - "traefik.http.routers.${STACK_NAME}-server.entrypoints=https"
+      - "traefik.http.routers.${STACK_NAME}-server.tls.certresolver=letsencrypt"
+      - "traefik.http.services.${STACK_NAME}-server.loadbalancer.server.port=80"
+      - "traefik.http.routers.${STACK_NAME}-server.tls=true"
+
+networks:
+  internal:
+  gaeco-network:
+    name: ${ENVIRONMENT_NETWORK}
+    external: true
+  traefik-proxy:
+    name: ${TRAEFIK_NETWORK}
+    external: true
